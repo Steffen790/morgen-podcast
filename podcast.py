@@ -44,7 +44,7 @@ def env(name: str, default: str) -> str:
 
 # Modelle und Stimmen lassen sich über Variablen ändern, ohne den Code anzufassen.
 TEXT_MODEL = env("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
-TEXT_FALLBACK = env("GEMINI_TEXT_FALLBACK", "gemini-2.5-flash")  # springt ein, wenn das erste Modell ausfällt
+TEXT_FALLBACK = env("GEMINI_TEXT_FALLBACK", "")  # optional: springt ein, wenn das erste Modell ausfällt
 TTS_MODEL = env("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
 TTS_FALLBACK = env("GEMINI_TTS_FALLBACK", "")
 VOICE_ALEX = env("VOICE_ALEX", "Charon")
@@ -153,7 +153,7 @@ def with_retry(fn, tries: int = 5, base_wait: int = 30):
             if not any(k in msg for k in TRANSIENT) or attempt == tries - 1:
                 raise
             wait = base_wait * (attempt + 1)
-            print(f"Fehler: {msg[:200]} – neuer Versuch in {wait}s", file=sys.stderr)
+            print(f"Fehler: {msg[:1500]} – neuer Versuch in {wait}s", file=sys.stderr)
             time.sleep(wait)
 
 
@@ -166,7 +166,7 @@ def run_with_models(models: list[str], fn):
             return with_retry(lambda: fn(model))
         except Exception as e:
             last = e
-            print(f"Modell {model} fehlgeschlagen: {str(e)[:300]}", file=sys.stderr)
+            print(f"Modell {model} fehlgeschlagen: {str(e)[:1500]}", file=sys.stderr)
     raise last if last else RuntimeError("Kein Modell angegeben")
 
 
