@@ -43,8 +43,10 @@ def env(name: str, default: str) -> str:
 
 
 # Modelle und Stimmen lassen sich über Variablen ändern, ohne den Code anzufassen.
-TEXT_MODEL = env("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
+TEXT_MODEL = env("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
+TEXT_FALLBACK = env("GEMINI_TEXT_FALLBACK", "gemini-2.5-flash")  # springt ein, wenn das erste Modell ausfällt
 TTS_MODEL = env("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+TTS_FALLBACK = env("GEMINI_TTS_FALLBACK", "")
 VOICE_ALEX = env("VOICE_ALEX", "Charon")
 VOICE_SAM = env("VOICE_SAM", "Kore")
 KEEP_EPISODES = int(env("KEEP_EPISODES", "14"))
@@ -69,8 +71,8 @@ FEEDS: dict[str, list[tuple[str, str]]] = {
         ("Spiegel", "https://www.spiegel.de/politik/index.rss"),
         ("Süddeutsche Zeitung", "https://rss.sueddeutsche.de/rss/Politik"),
     ],
-    "DRESDEN (lokal)": [
-        ("Sächsische Zeitung", "https://www.saechsische.de/rss/dresden"),
+    "DRESDEN UND SACHSEN (lokal)": [
+        ("MDR Sachsen", "https://www.mdr.de/nachrichten/sachsen/nachrichten-mdr-120~rss2.xml"),
     ],
     "WISSENSCHAFT UND TECHNIK": [
         ("Spiegel", "https://www.spiegel.de/wissenschaft/index.rss"),
@@ -138,18 +140,34 @@ def material_text(by_cat: dict[str, list[dict]]) -> str:
 # --------------------------------------------------------------------------- Texte erzeugen
 
 
-def with_retry(fn, tries: int = 5):
+TRANSIENT = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL", "DEADLINE", "timed out")
+
+
+def with_retry(fn, tries: int = 5, base_wait: int = 30):
+    """Wiederholt nur bei vorübergehenden Fehlern (Überlastung, Limit). Alles andere bricht sofort ab."""
     for attempt in range(tries):
         try:
             return fn()
         except Exception as e:
             msg = str(e)
-            fatal = any(k in msg for k in ("API_KEY_INVALID", "PERMISSION_DENIED", "API key not valid"))
-            if fatal or attempt == tries - 1:
+            if not any(k in msg for k in TRANSIENT) or attempt == tries - 1:
                 raise
-            wait = 20 * (attempt + 1)
+            wait = base_wait * (attempt + 1)
             print(f"Fehler: {msg[:200]} – neuer Versuch in {wait}s", file=sys.stderr)
             time.sleep(wait)
+
+
+def run_with_models(models: list[str], fn):
+    """Probiert die Modelle der Reihe nach; fn(modellname) liefert das Ergebnis."""
+    models = [m for i, m in enumerate(models) if m and m not in models[:i]]
+    last: Exception | None = None
+    for model in models:
+        try:
+            return with_retry(lambda: fn(model))
+        except Exception as e:
+            last = e
+            print(f"Modell {model} fehlgeschlagen: {str(e)[:300]}", file=sys.stderr)
+    raise last if last else RuntimeError("Kein Modell angegeben")
 
 
 def get_client():
@@ -164,9 +182,9 @@ def get_client():
 def generate_text(client, prompt: str) -> str:
     from google.genai import types
 
-    def call():
+    def call(model: str) -> str:
         resp = client.models.generate_content(
-            model=TEXT_MODEL,
+            model=model,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.6),
         )
@@ -174,7 +192,7 @@ def generate_text(client, prompt: str) -> str:
             raise RuntimeError("Leere Antwort vom Textmodell")
         return resp.text
 
-    return with_retry(call)
+    return run_with_models([TEXT_MODEL, TEXT_FALLBACK], call)
 
 
 def clean(text: str) -> str:
@@ -189,7 +207,7 @@ NEWS_PROMPT = """Du bist Nachrichtenredakteur und schreibst das Manuskript für 
 
 Regeln:
 - Verwende ausschließlich Informationen aus dem Material unten. Erfinde nichts. Fehlen Details, lass sie weg, statt zu raten.
-- Struktur in dieser Reihenfolge: bis zu 6 Meldungen Geopolitik (inklusive internationaler Themen), bis zu 6 Meldungen Innenpolitik und Lokales (mindestens 2 aus Dresden, wenn vorhanden), bis zu 4 Meldungen Wissenschaft und Technik, dazu 1 skurriles Naturwunder oder kurioses Wissenschaftsthema. Gibt das Material weniger her, nimm weniger.
+- Struktur in dieser Reihenfolge: bis zu 6 Meldungen Geopolitik (inklusive internationaler Themen), bis zu 6 Meldungen Innenpolitik und Lokales (mindestens 2 lokale Meldungen aus dem Block DRESDEN UND SACHSEN, Dresden hat Vorrang, wenn vorhanden), bis zu 4 Meldungen Wissenschaft und Technik, dazu 1 skurriles Naturwunder oder kurioses Wissenschaftsthema. Gibt das Material weniger her, nimm weniger.
 - Jede Meldung so ausführlich, wie das Material es hergibt, höchstens 6 Sätze: was ist passiert, wer ist beteiligt, Zahlen, Ort, Hintergrund. Sachlich, ohne Wertung, ohne Füllsätze. Nenne die Quelle kurz ("meldet die Tagesschau").
 - Beginne mit: "Guten Morgen. Heute ist {datum}. Das sind die Nachrichten." Kurze Überleitungen zwischen den Blöcken, zum Beispiel "Nun zur Innenpolitik." Ende mit: "Das waren die Nachrichten. Jetzt sprechen wir darüber."
 - Reiner Fließtext in Absätzen, eine Meldung pro Absatz. Keine Markdown-Zeichen, keine Listen, keine Überschriften, keine Sprecherlabels.
@@ -270,9 +288,9 @@ def synthesize(client, prompt: str, speakers: dict[str, str]) -> bytes:
             )
         )
 
-    def call():
+    def call(model: str) -> bytes:
         resp = client.models.generate_content(
-            model=TTS_MODEL,
+            model=model,
             contents=prompt,
             config=types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=speech),
         )
@@ -282,7 +300,7 @@ def synthesize(client, prompt: str, speakers: dict[str, str]) -> bytes:
                     return part.inline_data.data
         raise RuntimeError("Keine Audiodaten in der Antwort")
 
-    data = with_retry(call)
+    data = run_with_models([TTS_MODEL, TTS_FALLBACK], call)
     time.sleep(3)  # etwas Abstand wegen Mindestabständen der API
     return data
 
