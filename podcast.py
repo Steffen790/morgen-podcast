@@ -172,11 +172,20 @@ def run_with_models(models: list[str], fn):
 
 def get_client():
     from google import genai
+    from google.genai import types
 
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         sys.exit("GEMINI_API_KEY fehlt (als Secret im Repository oder als Umgebungsvariable setzen).")
-    return genai.Client(api_key=key)
+    # Das SDK wiederholt Anfragen sonst intern minutenlang. Wir steuern Wiederholung und
+    # Modellwechsel selbst (with_retry / run_with_models), deshalb hier nur ein Versuch.
+    return genai.Client(
+        api_key=key,
+        http_options=types.HttpOptions(
+            timeout=240_000,  # Millisekunden
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
 
 
 def generate_text(client, prompt: str) -> str:
