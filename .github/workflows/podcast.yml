@@ -1,0 +1,92 @@
+name: Morgen-Podcast
+
+on:
+  schedule:
+    # GitHub rechnet in UTC. Zwei Starts, damit es im Winter wie im Sommer vor 06:30 Uhr fertig ist.
+    # Der zweite Start tut nichts, wenn die Folge von heute schon existiert.
+    - cron: "17 4 * * *"
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Folge neu erzeugen, auch wenn es heute schon eine gibt"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: podcast
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Abhängigkeiten installieren
+        run: |
+          pip install -r requirements.txt
+          which ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
+
+      - name: Folge erzeugen
+        id: run
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_TEXT_MODEL: ${{ vars.GEMINI_TEXT_MODEL }}
+          GEMINI_TTS_MODEL: ${{ vars.GEMINI_TTS_MODEL }}
+          VOICE_ALEX: ${{ vars.VOICE_ALEX }}
+          VOICE_SAM: ${{ vars.VOICE_SAM }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          OWNER=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          export PODCAST_BASE_URL="https://${OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          if [ "$FORCE" = "true" ]; then
+            python podcast.py --force
+          else
+            python podcast.py
+          fi
+
+      - name: Ergebnis im Repository speichern
+        if: steps.run.outputs.generated == 'true'
+        run: |
+          git config user.name "podcast-bot"
+          git config user.email "podcast-bot@users.noreply.github.com"
+          git add docs
+          git commit -m "Folge $(date +%F)" || echo "nichts zu speichern"
+          git push
+
+      - name: Webseite hochladen
+        if: steps.run.outputs.generated == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Webseite veröffentlichen
+        id: deployment
+        if: steps.run.outputs.generated == 'true'
+        uses: actions/deploy-pages@v4
+
+      - name: Benachrichtigung "dein Audio ist fertig"
+        if: steps.run.outputs.generated == 'true' && env.NTFY_TOPIC != ''
+        run: curl -s -d "dein Audio ist fertig" "https://ntfy.sh/${NTFY_TOPIC}"
+
+      - name: Benachrichtigung bei Fehler
+        if: failure() && env.NTFY_TOPIC != ''
+        run: |
+          curl -s -d "Morgen-Podcast: Fehler beim Erzeugen, siehe GitHub Actions" "https://ntfy.sh/${NTFY_TOPIC}"
